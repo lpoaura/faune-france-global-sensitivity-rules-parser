@@ -25,6 +25,13 @@ MONTHES = {
     "décembre": 12,
 }
 
+MESSAGE_COLOR = {"info": "blue", "success": "green", "error": "red", "warning": "yellow"}
+
+
+def cli_message(message: str, color: str):
+    """Generate click message"""
+    return click.echo(click.style(message, fg=(MESSAGE_COLOR[color] or color)))
+
 
 def rmpt(txt: str) -> str:
     """Remove point character
@@ -42,13 +49,17 @@ def create_table(conn_string: str, drop_table: bool = False) -> None:
     """Create table in database"""
     conn = psycopg2.connect(conn_string)
     cur = conn.cursor()
-    click.echo("Create table src_lpodatas.t_c_visionature_hidding_rules")
+    cli_message("Create table src_lpodatas.t_c_visionature_hidding_rules", "info")
     if drop_table:
-        cur.execute(
-            """
-            DROP TABLE IF EXISTS src_lpodatas.t_c_visionature_hidding_rules;
-            """
-        )
+        if click.confirm(
+            """Are you sure you want to delete 'src_lpodatas.t_c_visionature_hidding_rules'?
+            All current data will be definitively lost!"""
+        ):
+            cur.execute(
+                """
+                DROP TABLE IF EXISTS src_lpodatas.t_c_visionature_hidding_rules;
+                """
+            )
     create_table_query = """
     CREATE TABLE IF NOT EXISTS src_lpodatas.t_c_visionature_hidding_rules
     (
@@ -72,7 +83,7 @@ def create_table(conn_string: str, drop_table: bool = False) -> None:
     conn.commit()
     cur.close()
     conn.close()
-    click.echo("Table created")
+    cli_message("Table created", "success")
 
 
 def list_tags() -> List[int]:
@@ -104,9 +115,9 @@ def get_cdnom(sci_name: str) -> Optional[int]:
     resp = requests.get(url, timeout=10)
     json_resp = resp.json()
     if "_embedded" in json_resp:
-        click.echo(f'get cd_nom for taxa {json_resp["_embedded"]["taxa"][0]["id"]}')
         cd_nom = json_resp["_embedded"]["taxa"][0]["id"]
         return cd_nom
+    cli_message(f"No matching value found in taxref for {sci_name}", "warning")
     return None
 
 
@@ -126,7 +137,9 @@ def get_line_data(line: "BeautifulSoup") -> Optional[dict]:
     if divs[0].find("b"):
 
         data["french_name"] = divs[0].find("b").get_text().replace("'", "''")
-        data["sci_name"] = re.sub("[()]", "", divs[0].find("span").get_text())
+        data["sci_name"] = re.sub(
+            "[()]", "", (divs[0].find("span") or divs[0].find("i")).get_text()
+        )
         data["cd_nom"] = get_cdnom(data["sci_name"])
         restriction = divs[1].get_text()
         data["all_time_restriction"] = restriction.startswith(
@@ -155,8 +168,11 @@ def get_line_data(line: "BeautifulSoup") -> Optional[dict]:
 
 def do_flush_table(cur) -> None:
     """Flush table in database"""
-    click.echo("Prepare to flush table content")
-    cur.execute("TRUNCATE src_lpodatas.t_c_visionature_hidding_rules RESTART IDENTITY;")
+    if click.confirm(
+        """Are you sure you want to flush table 'src_lpodatas.t_c_visionature_hidding_rules'?
+            All current data will be definitively lost!"""
+    ):
+        cur.execute("TRUNCATE src_lpodatas.t_c_visionature_hidding_rules RESTART IDENTITY;")
 
 
 def insert_data(conn_string: str, flush_table: bool = False) -> None:
@@ -166,52 +182,62 @@ def insert_data(conn_string: str, flush_table: bool = False) -> None:
     cur = conn.cursor()
 
     for tag in list_tags():
-        click.echo(f"download data for tag {tag}")
+        cli_message(f"download data for tag {tag}", "info")
         r = requests.get(
             f"https://www.faune-france.org/index.php?m_id=156&&sp_tg={tag}", timeout=5
         )
         soup = BeautifulSoup(r.content, "html.parser")
-
-        for line in soup.find_all("div", "row"):
-            items.append(get_line_data(line))
+        all_rows = soup.find_all("div", "row")
+        with click.progressbar(all_rows) as pbar:
+            for line in pbar:
+                items.append(get_line_data(line))
     if flush_table:
         do_flush_table(cur)
 
     current_ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    cli_message("INSERT values into table src_lpodatas.t_c_visionature_hidding_rules", "info")
+    with click.progressbar(items) as pbar:
+        for data in pbar:
+            if data:
+                try:
+                    # cli_message(
+                    #     f"insert data for taxa {data['french_name']} ({data['sci_name']})", "info"
+                    # )
+                    # cli_message(str(data), "warning")
+                    cur.execute(
+                        f"""
+                INSERT INTO src_lpodatas.t_c_visionature_hidding_rules (
+                    cd_nom,
+                    french_name,
+                    sci_name,
+                    all_time_restriction,
+                    periodic_restriction,
+                    restriction_atlas_min_code,
+                    restriction_start_day,
+                    restriction_start_month,
+                    restriction_end_day,
+                    restriction_end_month,
+                    timestamp_update
+                ) VALUES (
+                    {data['cd_nom'] or 'NULL'},
+                    '{data['french_name']}',
+                    '{data['sci_name']}',
+                    '{data['all_time_restriction']}',
+                    {data['periodic_restriction']},
+                    {data['restriction_atlas_min_code'] or 'NULL'},
+                    {data['restriction_start_day'] or 'NULL'},
+                    {data['restriction_start_month'] or 'NULL'},
+                    {data['restriction_end_day'] or 'NULL'},
+                    {data['restriction_end_month'] or 'NULL'},
+                    '{current_ts}'
+                    )
+                        ON CONFLICT (cd_nom) DO NOTHING; """,
+                    )
 
-    for data in items:
-        if data:
-            click.echo(f"insert data for taxa {data['french_name']} ({data['sci_name']})")
-            cur.execute(
-                f"""
-        INSERT INTO src_lpodatas.t_c_visionature_hidding_rules (
-            cd_nom,
-            french_name,
-            sci_name ,
-            all_time_restriction,
-            periodic_restriction,
-            restriction_atlas_min_code,
-            restriction_start_day,
-            restriction_start_month,
-            restriction_end_day,
-            restriction_end_month,
-            timestamp_update
-        ) VALUES (
-            {data['cd_nom']},
-            '{data['french_name']}',
-            '{data['sci_name']}' ,
-            '{data['all_time_restriction']}',
-            {data['periodic_restriction']},
-            {data['restriction_atlas_min_code'] or 'NULL'},
-            {data['restriction_start_day'] or 'NULL'},
-            {data['restriction_start_month'] or 'NULL'},
-            {data['restriction_end_day'] or 'NULL'},
-            {data['restriction_end_month'] or 'NULL'},
-            {current_ts}
-            )
-                ON CONFLICT (cd_nom) DO NOTHING; """,
-            )
-
-        conn.commit()
-        cur.close()
-        conn.close()
+                except Exception as e:
+                    cli_message(f"An error occured during insert : {str(e)}", "error")
+                    raise ValueError(str(e)) from e
+    conn.commit()
+    cur.close()
+    conn.close()
+    cli_message("Database connection is now closed", "success")
