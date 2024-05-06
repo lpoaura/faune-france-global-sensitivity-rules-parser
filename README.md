@@ -4,7 +4,7 @@ Very simple cli app to get and load into database faune-france global rules used
 
 ## Project Setup
 
-GN2PG Client can be installed by running `pip`.
+CLI app can be installed by running `pip`.
 
 ```bash
 pip install ff-hidden-species2pg
